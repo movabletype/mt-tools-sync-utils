@@ -14,7 +14,8 @@ $MT_HOME/
     tools/
 
 ## Usage
-perl -Ilib -Iextlib tools/sync-utils
+    mv $MT_HOME
+    perl -Ilib -Iextlib tools/sync-utils
 
     -a, --list-all     Prints list of server sync settings.
     -l, --list [<ID>]  Prints list of server sync settings Specify the ID of blog.
