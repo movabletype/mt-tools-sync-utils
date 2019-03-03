@@ -1,0 +1,255 @@
+#!/usr/bin/perl
+package MT::Tool::SyncUtils;
+
+use strict;
+use warnings;
+use FindBin;
+use lib ( "$FindBin::Bin/../lib", "$FindBin::Bin/../extlib" );
+
+use Data::Dumper;
+use Encode;
+
+use MT;
+use MT::Util qw( format_ts );
+use base qw( MT::Tool );
+
+sub help {
+    q{
+        -a, --list-all     Prints list of server sync settings.
+        -l, --list [<ID>]  Prints list of server sync settings Specify the ID of blog.
+        -d, --detail <ID>  Prints detail of sync settings. Specify the ID of sync setting.
+        -t, --test <ID>    Prints result of connection test. Specify the ID of sync setting.
+        -v, --verbose      Prints detail of connection. (only for -t)
+        -h, --help         this.
+    };
+}
+
+sub usage {'[-l|-d|-t]'}
+
+my ( $all, $list, $detail, $test );
+
+sub options {
+    return (
+        'all!'     => \$all,
+        'list=s'   => \$list,
+        'detail=s' => \$detail,
+        'test=s'   => \$test,
+    );
+}
+
+sub main {
+    my $class = shift;
+    my ($verbose) = $class->SUPER::main(@_);
+
+    # Monkey patch because $mt->app->reboot is not defined.
+    no warnings qw(once);
+    local *MT::reboot = sub { };
+
+    eval { require MT::SyncSetting; };
+    die "Synck.pack not installed\n"
+        if $@;
+
+    my $out
+        = $all  ? $class->list( undef, $verbose )
+        : $list ? $class->list( $list, $verbose )
+        : $detail ? $class->detail( $detail, $verbose )
+        : $test ? $class->test( $test, $verbose )
+        :         $class->show_help();
+
+    print Encode::encode_utf8("$out\n");
+
+}
+
+sub list {
+    my $class = shift;
+    my ( $blog_id, $versose ) = @_;
+
+    my $model = MT->model('sync_setting');
+
+    my $count
+        = $model->count( { ( $blog_id ? ( blog_id => $blog_id ) : () ) } );
+    return "No sync settings available." unless $count;
+
+    my $iter
+        = $model->load_iter( { ( $list ? ( blog_id => $blog_id ) : () ) } );
+
+    my $out;
+    while ( my $setting = $iter->() ) {
+        $out
+            .= "----------------------------------------------------------------------\n"
+            if $out;
+
+        my ( $sync_ymd, $sync_time );
+        if (   $setting->schedule_date
+            && $setting->schedule_date ne '00000000000000' )
+        {
+            $sync_ymd  = format_ts( "%Y-%m-%d", $setting->schedule_date );
+            $sync_time = format_ts( "%H:%M",    $setting->schedule_date );
+        }
+        my $schedule_date = $sync_ymd ? $sync_ymd . ' ' . $sync_time : '';
+
+        $out .= "ID       : " . $setting->id . "\n";
+        $out .= "BLOG ID  : " . $setting->blog_id . "\n";
+        $out .= "NAME     : " . $setting->name . "\n";
+        $out .= "SCHEDULE : " . $schedule_date . "\n";
+        $out .= "EMAIL    : " . $setting->notify_mail . "\n";
+    }
+
+    $out .= "\nTOTAL: $count\n";
+    return $out;
+}
+
+sub detail {
+    my $class = shift;
+    my ( $id, $versose ) = @_;
+
+    my $model = MT->model('sync_setting');
+    my $setting = $model->load( { id => $id, } );
+    return "Sync Setting (ID:" . $id . ") cloud not be found."
+        unless $setting;
+
+    my ( $sync_ymd, $sync_time );
+    if (   $setting->schedule_date
+        && $setting->schedule_date ne '00000000000000' )
+    {
+        $sync_ymd  = format_ts( "%Y-%m-%d", $setting->schedule_date );
+        $sync_time = format_ts( "%H:%M",    $setting->schedule_date );
+    }
+    my $schedule_date = $sync_ymd ? $sync_ymd . ' ' . $sync_time : '';
+
+    my $out;
+    $out .= "ID        : " . $setting->id . "\n";
+    $out .= "BLOG ID   : " . $setting->blog_id . "\n";
+    $out .= "NAME      : " . $setting->name . "\n";
+    $out .= "SCHEDULE  : " . $schedule_date . "\n";
+    $out .= "EMAIL     : " . $setting->notify_mail . "\n";
+    $out .= "ERROR ONLY: "
+        . ( $setting->notify_error_only ? 'YES' : 'NO' ) . "\n";
+
+    require MT::Serialize;
+    my $metadata = $setting->metadata;
+    my $ser      = MT::Serialize->new( MT->config->Serializer );
+    $metadata = $ser->unserialize( pack 'H*', $metadata );
+
+    $out .= "METADATA  : \n";
+
+    my $i = 0;
+    foreach my $data ( @{$$metadata} ) {
+        my $sync_type = delete $data->{sync_type};
+        my $type
+            = $sync_type == MT::SyncSetting::FTP()         ? 'FTP'
+            : $data->sync_type == MT::SyncSetting::RSYNC() ? 'RSYNC'
+            :   "Unknown(" . $data->sync_type . ")";
+        $out .= "\t[" . $i++ . "]: " . $type . "\n";
+
+        foreach my $key ( keys %$data ) {
+            my $val = $data->{$key};
+            $val = "********** [MASK]"
+                if $key =~ /password|secret|credential/g;
+            $out .= "\t\t" . $key . ": " . $val . "\n";
+        }
+    }
+
+    return $out;
+}
+
+sub test {
+    my $class = shift;
+    my ( $id, $verbose ) = @_;
+
+    my $model = MT->model('sync_setting');
+    my $setting = $model->load( { id => $id, } );
+    return "Sync Setting (ID:" . $id . ") cloud not be found."
+        unless $setting;
+
+    require MT::Serialize;
+    my $metadata = $setting->metadata;
+    my $ser      = MT::Serialize->new( MT->config->Serializer );
+    $metadata = $ser->unserialize( pack 'H*', $metadata );
+
+    $MT::DebugMode = 1 if $verbose;
+    my $out;
+    my $i;
+    foreach my $data ( @{$$metadata} ) {
+        my $sync_type = delete $data->{sync_type};
+        if ( $sync_type != MT::SyncSetting::FTP() ) {
+            $out .= "Skip sync target [" . $i++ . "]\n";
+            next;
+        }
+
+        $out
+            .= "Connect test to "
+            . $data->{ftp_server}
+            . " has been started.\n";
+        eval { _connect_ftp($data); };
+        if ($@) {
+            $out .= $@ . "\n";
+        }
+        else {
+            $out
+                .= "Connect test successfully: " . $data->{ftp_server} . "\n";
+        }
+    }
+
+    return $out;
+}
+
+sub _connect_ftp {
+    my ($opts) = @_;
+
+    require MT::FileSynchronizer;
+
+    my $ftp_type = $opts->{enable_ssl} ? 'FTPS' : 'FTP';
+    my $syncftp;
+
+    if ( $^O ne 'MSWin32' ) {
+        $SIG{ALRM} = sub {
+            my $msg = $syncftp ? $syncftp->errstr : $@;
+            die
+                "An error occurred while attempting to connect to the FTP server '"
+                . $opts->{ftp_server} . "': "
+                . Encode::is_utf8($msg) ? $msg : Encode::decode_utf8($msg);
+        };
+        alarm 90;
+    }
+    eval {
+        $syncftp
+            = MT::FileSynchronizer->new( $ftp_type, $opts->{ftp_server},
+            $opts->{ftp_username},
+            Encode::encode_utf8( $opts->{ftp_password} ),
+            $opts->{port} );
+    };
+    if ( $@ || !$syncftp ) {
+        my $msg = $syncftp ? $syncftp->errstr : $@;
+        die
+            "An error occurred while attempting to connect to the FTP server '"
+            . $opts->{ftp_server} . "': "
+            . Encode::is_utf8($msg) ? $msg : Encode::decode_utf8($msg);
+    }
+
+    if ( $^O ne 'MSWin32' ) {
+        alarm 0;
+    }
+
+    my $current_dir;
+    eval { $current_dir = $syncftp->{ftp}->pwd(); };
+    if ( $@ || !$current_dir ) {
+        die
+            "An error occurred while attempting to retrieve the current directory from '"
+            . $opts->{ftp_server} . "";
+    }
+
+    my @current_list;
+    eval { @current_list = $syncftp->{ftp}->list($current_dir); };
+    if ($@) {
+        die
+            "An error occurred while attempting to retrieve the list of directories from '"
+            . $opts->{ftp_server} . "'";
+    }
+
+    return 1;
+}
+
+__PACKAGE__->main() unless caller;
+
+1;
