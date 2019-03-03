@@ -1,4 +1,4 @@
-# mt-tools-ync-utils
+# mt-tools-sync-utils
 This utility program allows you to show list of content sync settings, show setting details, and connection test.
 
 AUTHOR: Six Apart
