@@ -136,14 +136,15 @@ sub detail {
     my $i = 0;
     foreach my $data ( @{$$metadata} ) {
         my $sync_type = delete $data->{sync_type};
-        my $type
-            = $sync_type == MT::SyncSetting::FTP()         ? 'FTP'
-            : $data->sync_type == MT::SyncSetting::RSYNC() ? 'RSYNC'
-            :   "Unknown(" . $data->sync_type . ")";
+        my $types = MT::SyncSetting::TYPE();
+        my $type = $types->{$sync_type} || "Unknown(" . $sync_type . ")";
         $out .= "\t[" . $i++ . "]: " . $type . "\n";
 
-        foreach my $key ( keys %$data ) {
-            my $val = $data->{$key};
+        foreach my $key ( sort keys %$data ) {
+            my $prefix = (split /_/, $key)[0];
+            next if ( lc($type) ne $prefix ) && ( grep { lc($_) eq $prefix } values %$types );
+
+            my $val = $data->{$key} || '';
             $val = "********** [MASK]"
                 if $key =~ /password|secret|credential/g;
             $out .= "\t\t" . $key . ": " . $val . "\n";
@@ -172,22 +173,27 @@ sub test {
     my $i;
     foreach my $data ( @{$$metadata} ) {
         my $sync_type = delete $data->{sync_type};
-        if ( $sync_type != MT::SyncSetting::FTP() ) {
-            $out .= "Skip sync target [" . $i++ . "]\n";
-            next;
+        if ( $sync_type == MT::SyncSetting::FTP() ) {
+            $out .= "Connect test to " . $data->{ftp_server} . " has been started.\n";
+            eval { _connect_ftp($data); };
+            $out .= $@ ? $@ : "Connect test successfully: " . $data->{ftp_server};
+            $out .= "\n";
         }
-
-        $out
-            .= "Connect test to "
-            . $data->{ftp_server}
-            . " has been started.\n";
-        eval { _connect_ftp($data); };
-        if ($@) {
-            $out .= $@ . "\n";
+        elsif ( $sync_type == MT::SyncSetting::S3() ) {
+            $out .= "Connect test to S3 (bucket: " . $data->{s3_bucket} . ") has been started. \n";
+            eval { _connect_s3($data); };
+            $out .= $@ ? $@ : "Connect test successfully: S3 (bucket: " . $data->{s3_bucket} . ")";
+            $out .= "\n";
+        }
+        elsif ( $sync_type == MT::SyncSetting::R2() ) {
+            $out .= "Connect test to R2 (bucket: " . $data->{r2_bucket} . ") has been started.\n";
+            eval { _connect_r2($data); };
+            $out .= $@ ? $@ : "Connect test successfully: R2 (bucket: " . $data->{r2_bucket} . ")";
+            $out .= "\n";
         }
         else {
-            $out
-                .= "Connect test successfully: " . $data->{ftp_server} . "\n";
+            $out .= "Skip sync target [" . $i++ . "]\n";
+            next;
         }
     }
 
@@ -246,6 +252,51 @@ sub _connect_ftp {
             "An error occurred while attempting to retrieve the list of directories from '"
             . $opts->{ftp_server} . "'";
     }
+
+    return 1;
+}
+
+sub _connect_s3 {
+    my $args = shift;
+
+    require MT::FileSynchronizer;
+
+    my $synchronizer = MT::FileSynchronizer->new('S3');
+    my $bucket = $synchronizer->bucket({
+        aws_access_key_id     => $args->{s3_access_key_id},
+        aws_secret_access_key => $args->{s3_secret_access_key},
+        host                  => MT->config->AmazonS3Host,
+        name                  => $args->{s3_bucket},
+        region                => $args->{s3_region},
+        retry                 => MT->config->AmazonS3Retry,
+        secure                => $args->{s3_enable_ssl},
+        timeout               => MT->config->AmazonS3Timeout,
+    });
+
+    $bucket->get_location_constraint
+       or die $bucket->err . ': ' . $bucket->errstr;
+
+    return 1;
+}
+
+sub _connect_r2 {
+    my $args = shift;
+
+    require MT::FileSynchronizer;
+
+    my $synchronizer = MT::FileSynchronizer->new('R2');
+    my $bucket = $synchronizer->bucket({
+        aws_access_key_id     => $args->{r2_access_key_id},
+        aws_secret_access_key => $args->{r2_secret_access_key},
+        host                  => $args->{r2_account_id} . '.' . MT->config->CloudflareR2Host,
+        name                  => $args->{r2_bucket},
+        retry                 => MT->config->AmazonS3Retry,
+        secure                => $args->{r2_enable_ssl},
+        timeout               => MT->config->AmazonS3Timeout,
+    });
+
+    $bucket->get_location_constraint
+      or die $bucket->err  . ': ' . $bucket->errstr;
 
     return 1;
 }
