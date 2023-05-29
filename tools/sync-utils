@@ -206,11 +206,11 @@ sub _connect_ftp {
     require MT::FileSynchronizer;
 
     my $ftp_type = $opts->{enable_ssl} ? 'FTPS' : 'FTP';
-    my $syncftp;
+    my $synchronizer;
 
     if ( $^O ne 'MSWin32' ) {
         $SIG{ALRM} = sub {
-            my $msg = $syncftp ? $syncftp->errstr : $@;
+            my $msg = $synchronizer ? $synchronizer->errstr : $@;
             die
                 "An error occurred while attempting to connect to the FTP server '"
                 . $opts->{ftp_server} . "': "
@@ -219,14 +219,16 @@ sub _connect_ftp {
         alarm 90;
     }
     eval {
-        $syncftp
-            = MT::FileSynchronizer->new( $ftp_type, $opts->{ftp_server},
+        $synchronizer = MT::FileSynchronizer->new( $ftp_type );
+        $synchronizer->connect(
+            $ftp_type,
+            $opts->{ftp_server},
             $opts->{ftp_username},
             Encode::encode_utf8( $opts->{ftp_password} ),
-            $opts->{port} );
+            $opts->{port},
+        );
     };
-    if ( $@ || !$syncftp ) {
-        my $msg = $syncftp ? $syncftp->errstr : $@;
+    if ( my $msg = $@ || $synchronizer->errstr ) {
         die
             "An error occurred while attempting to connect to the FTP server '"
             . $opts->{ftp_server} . "': "
@@ -238,7 +240,7 @@ sub _connect_ftp {
     }
 
     my $current_dir;
-    eval { $current_dir = $syncftp->{ftp}->pwd(); };
+    eval { $current_dir = $synchronizer->{ftp}->pwd; };
     if ( $@ || !$current_dir ) {
         die
             "An error occurred while attempting to retrieve the current directory from '"
@@ -246,7 +248,7 @@ sub _connect_ftp {
     }
 
     my @current_list;
-    eval { @current_list = $syncftp->{ftp}->list($current_dir); };
+    eval { @current_list = $synchronizer->{ftp}->list($current_dir); };
     if ($@) {
         die
             "An error occurred while attempting to retrieve the list of directories from '"
