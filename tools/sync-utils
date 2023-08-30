@@ -248,7 +248,7 @@ sub _connect_ftp {
     }
 
     my @current_list;
-    eval { @current_list = $synchronizer->{ftp}->list($current_dir); };
+    eval { @current_list = $synchronizer->{ftp}->ls($current_dir); };
     if ($@) {
         die
             "An error occurred while attempting to retrieve the list of directories from '"
