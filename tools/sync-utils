@@ -297,7 +297,7 @@ sub _connect_r2 {
         timeout               => MT->config->AmazonS3Timeout,
     });
 
-    $bucket->get_location_constraint
+    $bucket->list({ 'max-keys' => 1 })
       or die $bucket->err  . ': ' . $bucket->errstr;
 
     return 1;
