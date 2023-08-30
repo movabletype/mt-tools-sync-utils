@@ -297,7 +297,7 @@ sub _connect_r2 {
         timeout               => MT->config->AmazonS3Timeout,
     });
 
-    $bucket->list({ 'max-keys' => 1 })
+    $bucket->list_v2({ 'max-keys' => 1 })
       or die $bucket->err  . ': ' . $bucket->errstr;
 
     return 1;
