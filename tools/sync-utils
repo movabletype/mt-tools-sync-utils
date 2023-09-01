@@ -136,14 +136,15 @@ sub detail {
     my $i = 0;
     foreach my $data ( @{$$metadata} ) {
         my $sync_type = delete $data->{sync_type};
-        my $type
-            = $sync_type == MT::SyncSetting::FTP()         ? 'FTP'
-            : $data->sync_type == MT::SyncSetting::RSYNC() ? 'RSYNC'
-            :   "Unknown(" . $data->sync_type . ")";
+        my $types = MT::SyncSetting::TYPE();
+        my $type = $types->{$sync_type} || "Unknown(" . $sync_type . ")";
         $out .= "\t[" . $i++ . "]: " . $type . "\n";
 
-        foreach my $key ( keys %$data ) {
-            my $val = $data->{$key};
+        foreach my $key ( sort keys %$data ) {
+            my $prefix = (split /_/, $key)[0];
+            next if ( lc($type) ne $prefix ) && ( grep { lc($_) eq $prefix } values %$types );
+
+            my $val = $data->{$key} || '';
             $val = "********** [MASK]"
                 if $key =~ /password|secret|credential/g;
             $out .= "\t\t" . $key . ": " . $val . "\n";
@@ -172,22 +173,27 @@ sub test {
     my $i;
     foreach my $data ( @{$$metadata} ) {
         my $sync_type = delete $data->{sync_type};
-        if ( $sync_type != MT::SyncSetting::FTP() ) {
-            $out .= "Skip sync target [" . $i++ . "]\n";
-            next;
+        if ( $sync_type == MT::SyncSetting::FTP() ) {
+            $out .= "Connect test to " . $data->{ftp_server} . " has been started.\n";
+            eval { _connect_ftp($data); };
+            $out .= $@ ? $@ : "Connect test successfully: " . $data->{ftp_server};
+            $out .= "\n";
         }
-
-        $out
-            .= "Connect test to "
-            . $data->{ftp_server}
-            . " has been started.\n";
-        eval { _connect_ftp($data); };
-        if ($@) {
-            $out .= $@ . "\n";
+        elsif ( $sync_type == MT::SyncSetting::S3() ) {
+            $out .= "Connect test to S3 (bucket: " . $data->{s3_bucket} . ") has been started. \n";
+            eval { _connect_s3($data); };
+            $out .= $@ ? $@ : "Connect test successfully: S3 (bucket: " . $data->{s3_bucket} . ")";
+            $out .= "\n";
+        }
+        elsif ( $sync_type == MT::SyncSetting::R2() ) {
+            $out .= "Connect test to R2 (bucket: " . $data->{r2_bucket} . ") has been started.\n";
+            eval { _connect_r2($data); };
+            $out .= $@ ? $@ : "Connect test successfully: R2 (bucket: " . $data->{r2_bucket} . ")";
+            $out .= "\n";
         }
         else {
-            $out
-                .= "Connect test successfully: " . $data->{ftp_server} . "\n";
+            $out .= "Skip sync target [" . $i++ . "]\n";
+            next;
         }
     }
 
@@ -200,11 +206,11 @@ sub _connect_ftp {
     require MT::FileSynchronizer;
 
     my $ftp_type = $opts->{enable_ssl} ? 'FTPS' : 'FTP';
-    my $syncftp;
+    my $synchronizer;
 
     if ( $^O ne 'MSWin32' ) {
         $SIG{ALRM} = sub {
-            my $msg = $syncftp ? $syncftp->errstr : $@;
+            my $msg = $synchronizer ? $synchronizer->errstr : $@;
             die
                 "An error occurred while attempting to connect to the FTP server '"
                 . $opts->{ftp_server} . "': "
@@ -213,14 +219,16 @@ sub _connect_ftp {
         alarm 90;
     }
     eval {
-        $syncftp
-            = MT::FileSynchronizer->new( $ftp_type, $opts->{ftp_server},
+        $synchronizer = MT::FileSynchronizer->new( $ftp_type );
+        $synchronizer->connect(
+            $ftp_type,
+            $opts->{ftp_server},
             $opts->{ftp_username},
             Encode::encode_utf8( $opts->{ftp_password} ),
-            $opts->{port} );
+            $opts->{port},
+        );
     };
-    if ( $@ || !$syncftp ) {
-        my $msg = $syncftp ? $syncftp->errstr : $@;
+    if ( my $msg = $@ || $synchronizer->errstr ) {
         die
             "An error occurred while attempting to connect to the FTP server '"
             . $opts->{ftp_server} . "': "
@@ -232,7 +240,7 @@ sub _connect_ftp {
     }
 
     my $current_dir;
-    eval { $current_dir = $syncftp->{ftp}->pwd(); };
+    eval { $current_dir = $synchronizer->{ftp}->pwd; };
     if ( $@ || !$current_dir ) {
         die
             "An error occurred while attempting to retrieve the current directory from '"
@@ -240,12 +248,57 @@ sub _connect_ftp {
     }
 
     my @current_list;
-    eval { @current_list = $syncftp->{ftp}->list($current_dir); };
+    eval { @current_list = $synchronizer->{ftp}->ls($current_dir); };
     if ($@) {
         die
             "An error occurred while attempting to retrieve the list of directories from '"
             . $opts->{ftp_server} . "'";
     }
+
+    return 1;
+}
+
+sub _connect_s3 {
+    my $args = shift;
+
+    require MT::FileSynchronizer;
+
+    my $synchronizer = MT::FileSynchronizer->new('S3');
+    my $bucket = $synchronizer->bucket({
+        aws_access_key_id     => $args->{s3_access_key_id},
+        aws_secret_access_key => $args->{s3_secret_access_key},
+        host                  => MT->config->AmazonS3Host,
+        name                  => $args->{s3_bucket},
+        region                => $args->{s3_region},
+        retry                 => MT->config->AmazonS3Retry,
+        secure                => $args->{s3_enable_ssl},
+        timeout               => MT->config->AmazonS3Timeout,
+    });
+
+    $bucket->get_location_constraint
+       or die $bucket->err . ': ' . $bucket->errstr;
+
+    return 1;
+}
+
+sub _connect_r2 {
+    my $args = shift;
+
+    require MT::FileSynchronizer;
+
+    my $synchronizer = MT::FileSynchronizer->new('R2');
+    my $bucket = $synchronizer->bucket({
+        aws_access_key_id     => $args->{r2_access_key_id},
+        aws_secret_access_key => $args->{r2_secret_access_key},
+        host                  => $args->{r2_account_id} . '.' . MT->config->CloudflareR2Host,
+        name                  => $args->{r2_bucket},
+        retry                 => MT->config->AmazonS3Retry,
+        secure                => $args->{r2_enable_ssl},
+        timeout               => MT->config->AmazonS3Timeout,
+    });
+
+    $bucket->list_v2({ 'max-keys' => 1 })
+      or die $bucket->err  . ': ' . $bucket->errstr;
 
     return 1;
 }
